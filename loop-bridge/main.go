@@ -7,6 +7,7 @@
 //	    # --wiki：先把知识库节点 token 解析成底层 docx，再拉取（仅支持 obj_type=docx）
 //	loop-bridge sheet-dump  --sheet <spreadsheet_token>                  # 读电子表格全部分表的单元格值
 //	loop-bridge resolve-wiki --node <wiki_node_token>                    # 仅解析 wiki 节点 → {obj_token, obj_type}
+//	loop-bridge ensure-board --app <app_token> [--table <table_id>]      # 幂等建好 issue 看板的 9 个字段
 //	loop-bridge issues-list --app <app_token> --table <table_id>         # 列 Bitable 看板全部 issue
 //	loop-bridge issue-upsert --app <app_token> --table <table_id> [--key-field external_key] < records.json
 //	    # 按 key-field 幂等 upsert（有则 update，无则 create），records.json 形如 {"records":[{"fields":{...}}]}
@@ -46,6 +47,8 @@ func main() {
 		runSheetDump(args)
 	case "resolve-wiki":
 		runResolveWiki(args)
+	case "ensure-board":
+		runEnsureBoard(args)
 	case "issues-list":
 		runIssuesList(args)
 	case "issue-upsert":
@@ -64,6 +67,7 @@ func usage() {
   loop-bridge doc-dump     --doc <document_id> | --wiki <wiki_node_token>
   loop-bridge sheet-dump   --sheet <spreadsheet_token>
   loop-bridge resolve-wiki --node <wiki_node_token>
+  loop-bridge ensure-board --app <app_token> [--table <table_id>]
   loop-bridge issues-list  --app <app_token> --table <table_id>
   loop-bridge issue-upsert --app <app_token> --table <table_id> [--key-field external_key] < records.json
 
@@ -196,6 +200,69 @@ func colLetter(n int) string {
 		s = "A"
 	}
 	return s
+}
+
+// ---------------------------------------------------------------------------
+// 子命令：ensure-board（幂等建好 issue 看板字段）
+// ---------------------------------------------------------------------------
+
+// fieldSpec 描述 issue 看板需要的一个字段。Type: 1=多行文本 2=数字 3=单选。
+type fieldSpec struct {
+	Name    string
+	Type    int
+	Options []string // 仅单选用
+}
+
+// boardFields 是 issue 看板的字段契约（与 workflow 写回的字段对应）。
+var boardFields = []fieldSpec{
+	{"external_key", 1, nil},
+	{"requirement", 1, nil},
+	{"title", 1, nil},
+	{"type", 3, []string{"bug", "gap", "blocker", "spec-question"}},
+	{"status", 3, []string{"open", "in_progress", "verifying", "resolved", "wont_fix"}},
+	{"severity", 3, []string{"p0", "p1", "p2"}},
+	{"acceptance_ref", 1, nil},
+	{"evidence", 1, nil},
+	{"updated_round", 2, nil},
+}
+
+func runEnsureBoard(args map[string]string) {
+	app, table := args["app"], args["table"]
+	if app == "" {
+		fmt.Fprintln(os.Stderr, "缺少 --app <app_token>")
+		os.Exit(2)
+	}
+	c := mustClient()
+	if table == "" {
+		// 未指定表则用多维表格里的第一张表
+		tables, err := c.listTables(app)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "列数据表失败:", err)
+			os.Exit(1)
+		}
+		if len(tables) == 0 {
+			fmt.Fprintln(os.Stderr, "该多维表格没有任何数据表")
+			os.Exit(1)
+		}
+		table = tables[0]
+	}
+	existing, err := c.listFieldNames(app, table)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "列字段失败:", err)
+		os.Exit(1)
+	}
+	created := []string{}
+	for _, f := range boardFields {
+		if existing[f.Name] {
+			continue
+		}
+		if err := c.createField(app, table, f); err != nil {
+			fmt.Fprintf(os.Stderr, "创建字段 %q 失败: %v\n", f.Name, err)
+			os.Exit(1)
+		}
+		created = append(created, f.Name)
+	}
+	writeJSON(map[string]any{"app": app, "table": table, "created": created, "fields_total": len(boardFields)})
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +675,67 @@ func (c *client) readSheetValues(token, rng string) ([][]any, error) {
 		return nil, err
 	}
 	return out.ValueRange.Values, nil
+}
+
+// listTables 列出多维表格的全部数据表 table_id（按顺序）。
+func (c *client) listTables(app string) ([]string, error) {
+	path := "/open-apis/bitable/v1/apps/" + url.PathEscape(app) + "/tables?page_size=100"
+	data, err := c.doAPI(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Items []struct {
+			TableID string `json:"table_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Items))
+	for _, it := range out.Items {
+		ids = append(ids, it.TableID)
+	}
+	return ids, nil
+}
+
+// listFieldNames 返回某数据表已存在的字段名集合。
+func (c *client) listFieldNames(app, table string) (map[string]bool, error) {
+	path := fmt.Sprintf("/open-apis/bitable/v1/apps/%s/tables/%s/fields?page_size=100",
+		url.PathEscape(app), url.PathEscape(table))
+	data, err := c.doAPI(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Items []struct {
+			FieldName string `json:"field_name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, it := range out.Items {
+		names[it.FieldName] = true
+	}
+	return names, nil
+}
+
+// createField 在数据表里新建一个字段（单选字段带上选项）。
+func (c *client) createField(app, table string, f fieldSpec) error {
+	body := map[string]any{"field_name": f.Name, "type": f.Type}
+	if len(f.Options) > 0 {
+		opts := make([]map[string]any, 0, len(f.Options))
+		for _, o := range f.Options {
+			opts = append(opts, map[string]any{"name": o})
+		}
+		body["property"] = map[string]any{"options": opts}
+	}
+	path := fmt.Sprintf("/open-apis/bitable/v1/apps/%s/tables/%s/fields",
+		url.PathEscape(app), url.PathEscape(table))
+	_, err := c.doAPI(http.MethodPost, path, body)
+	return err
 }
 
 // fetchAllRecords 翻页拉取 Bitable 表全部记录。

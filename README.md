@@ -44,9 +44,7 @@ To start fresh, delete `.self-loop/run/<id>/`.
 
 - **Claude Code** with the `Workflow` tool and worktree-capable agents.
 - A **Feishu/Lark self-built app** with doc-read (`docx:document`), wiki-read (`wiki:wiki:readonly`, for wiki links), and bitable-read/write (`bitable:app`) permissions.
-- A **Feishu Bitable** to act as the issue board, with fields:
-  `external_key` (single-line text, the idempotency key), `requirement`, `title`, `type`,
-  `status`, `severity`, `acceptance_ref`, `evidence`, `updated_round` (number).
+- A **Feishu Bitable** to act as the issue board. Create an empty one (anywhere — e.g. next to the requirements doc) and share it with the app; `loop-bridge ensure-board --app <token> [--table <id>]` then provisions the 9 fields idempotently (`external_key` the idempotency key, `requirement`, `title`, `type`, `status`, `severity`, `acceptance_ref`, `evidence`, `updated_round`). Needs the `bitable:app` (write) scope.
 - **Go 1.22+** to build `loop-bridge`.
 
 ## Install

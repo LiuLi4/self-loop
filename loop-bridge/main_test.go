@@ -76,6 +76,29 @@ func TestPlanUpsert(t *testing.T) {
 	}
 }
 
+func TestBoardFields(t *testing.T) {
+	if len(boardFields) != 9 {
+		t.Fatalf("看板应有 9 个字段, got %d", len(boardFields))
+	}
+	for _, f := range boardFields {
+		if f.Type == 3 && len(f.Options) == 0 {
+			t.Errorf("单选字段 %q 必须带选项", f.Name)
+		}
+		if f.Type != 3 && len(f.Options) != 0 {
+			t.Errorf("非单选字段 %q 不应带选项", f.Name)
+		}
+	}
+	found := false
+	for _, f := range boardFields {
+		if f.Name == "external_key" && f.Type == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("缺少文本类型的 external_key 字段")
+	}
+}
+
 func TestColLetter(t *testing.T) {
 	cases := map[int]string{1: "A", 26: "Z", 27: "AA", 52: "AZ", 53: "BA", 0: "A"}
 	for n, want := range cases {

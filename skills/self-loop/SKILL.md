@@ -66,7 +66,12 @@ docx 的 `token` 即 `docId`；wiki 的 `token` 记为 `wikiNode`，待 prefligh
    ```
    返回 JSON（哪怕空数组）即通；报错则按错误信息修（loop-bridge 未装/权限/字段/网络），不要进入 loop。
    > 未安装 loop-bridge：`go install github.com/LiuLi4/self-loop/loop-bridge@latest`，或克隆本仓后 `go build -o ~/bin/loop-bridge ./loop-bridge`。
-3. **看板 schema**：Bitable 必须含字段 `external_key`(单行文本,唯一键)、`requirement`、`title`、`type`、`status`、`severity`、`acceptance_ref`、`evidence`、`updated_round`(数字)。缺字段先引导用户补（一次性）。
+3. **看板 schema（可自动建字段）**：看板需含 9 个字段 `external_key`(唯一键)、`requirement`、`title`、`type`、`status`、`severity`、`acceptance_ref`、`evidence`、`updated_round`(数字)。
+   用户只需手动**新建一个空多维表格**并共享给应用，给出 app_token/table_id；字段由你用 `ensure-board` 幂等建好（需 `bitable:app` 写权限）：
+   ```bash
+   ${SELF_LOOP_BRIDGE_CMD:-loop-bridge} ensure-board --app "$FEISHU_BITABLE_APP" --table "$FEISHU_BITABLE_TABLE"
+   ```
+   输出 `{created:[...], fields_total:9}` 即建好（已存在字段自动跳过，可重复跑）。
 4. **wiki 解析 + 文档类型判定**（仅当 §0 识别为 `kind=wiki`）：
    ```bash
    ${SELF_LOOP_BRIDGE_CMD:-loop-bridge} resolve-wiki --node "<wikiNode>"
