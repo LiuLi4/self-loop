@@ -1,0 +1,13 @@
+# Go build output
+/bin/
+*.exe
+*.test
+*.out
+
+# self-loop run workdir (per-run DoD/state)
+.self-loop/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
