@@ -224,6 +224,7 @@ var boardFields = []fieldSpec{
 	{"acceptance_ref", 1, nil},
 	{"evidence", 1, nil},
 	{"updated_round", 2, nil},
+	{"parent_key", 1, nil}, // 子记录(如用户答复)挂到父 issue 的 external_key
 }
 
 func runEnsureBoard(args map[string]string) {

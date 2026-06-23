@@ -166,8 +166,29 @@ if (boot.resume && (boot.requirements?.length ?? 0) > 0) {
   openIssues = [...outOfScope]
 }
 
+// 依赖/并行分析：把需求分成有序"波次"——同波次互相独立可并行，后波依赖前波
+const WAVES_SCHEMA = {
+  type: 'object', required: ['waves'],
+  properties: { waves: { type: 'array', items: { type: 'array', items: { type: 'string' } } }, reason: { type: 'string' } },
+}
+const reqByKey = Object.fromEntries(requirements.map(r => [r.key, r]))
+let waves
+{
+  const wv = await agent(
+    `分析这些需求间的实现依赖，分成有序"波次"：同一波次内的需求互相独立、可并行；靠后的波次依赖靠前波次的产物。倾向尽量并行（彼此独立就放同一波）。
+     需求：${JSON.stringify(requirements.map(r => ({ key: r.key, title: r.title, flow: r.flow, apis: r.apis })))}
+     返回 {waves: [["REQ-1","REQ-2"],["REQ-3"]], reason}`,
+    { label: 'intake:waves', phase: 'Intake', schema: WAVES_SCHEMA })
+  const seen = new Set()
+  waves = (wv.waves || []).map(w => w.filter(k => reqByKey[k] && !seen.has(k) && seen.add(k))).filter(w => w.length)
+  const missing = requirements.map(r => r.key).filter(k => !seen.has(k))
+  if (missing.length) waves.push(missing) // 漏掉的需求兜底放最后一波
+  if (!waves.length) waves = [requirements.map(r => r.key)]
+  log(`并行波次：${waves.map((w, i) => `W${i + 1}[${w.join(',')}]`).join(' → ')}`)
+}
+
 // ============================================================
-// loop-until-dry（round 从 startRound 续）
+// loop-until-dry（round 从 startRound 续；每轮按波次顺序、波次内并行）
 // ============================================================
 let round = startRound
 let converged = false
@@ -176,28 +197,35 @@ while (round < MAX_ROUNDS) {
   round++
   log(`=== Round ${round}: ${requirements.length} 需求并行 ===`)
 
-  const results = await pipeline(requirements,
-    // ---- maker：先读规则 + 冻结 DoD（从磁盘），再实现 ----
-    (r) => agent(
-      `【先读规则】开工前先读 ${RULES}（含历轮沉淀的 "## Learned" 教训），严格遵守其中所有约束。
-       【读 DoD】读取冻结的验收契约文件 ${RUN}/dod/${r.key}.json（不得修改它）。
-       在隔离 worktree 内推进需求 ${r.key} 的实现，目标是让该 DoD 逐条达标。
-       走本项目的 SDLC/构建流程（若装了 /sdlc 之类 skill 则用之）。
-       完成质量门后 git 提交、推送、开/更新 PR（分支 self-loop/${r.key}-*）。
-       已知 open issue（与本需求相关的请修复并标 resolved）：${JSON.stringify(openIssues.filter(i => i.requirement === r.key && i.status !== 'resolved'))}
-       【硬护栏】禁止：改需求正文、改冻结 DoD、部署生产、读写 secret、合并默认分支(main)、覆盖非本任务脏改动。
-       返回每条 DoD 自评 + 本轮新发现 issue（external_key 用 ${r.key}#issue-N）。`,
-      { label: `build:${r.key}`, phase: 'Build', isolation: 'worktree', schema: BUILD_SCHEMA }),
+  const results = []
+  for (const wave of waves) {
+    const waveReqs = wave.map(k => reqByKey[k]).filter(Boolean)
+    if (!waveReqs.length) continue
+    log(`  ▶ 波次 [${wave.join(', ')}] 并行 ${waveReqs.length} 个`)
+    const wr = await pipeline(waveReqs,
+      // ---- maker：先读规则 + 冻结 DoD（从磁盘），再实现 ----
+      (r) => agent(
+        `【先读规则】开工前先读 ${RULES}（含历轮沉淀的 "## Learned" 教训），严格遵守其中所有约束。
+         【读 DoD】读取冻结的验收契约文件 ${RUN}/dod/${r.key}.json（不得修改它）。
+         在隔离 worktree 内推进需求 ${r.key} 的实现，目标是让该 DoD 逐条达标。
+         走本项目的 SDLC/构建流程（若装了 /sdlc 之类 skill 则用之）。
+         完成质量门后 git 提交、推送、开/更新 PR（分支 self-loop/${r.key}-*）。
+         已知 open issue（与本需求相关的请修复并标 resolved）：${JSON.stringify(openIssues.filter(i => i.requirement === r.key && i.status !== 'resolved'))}
+         【硬护栏】禁止：改需求正文、改冻结 DoD、部署生产、读写 secret、合并默认分支(main)、覆盖非本任务脏改动。
+         返回每条 DoD 自评 + 本轮新发现 issue（external_key 用 ${r.key}#issue-N）。`,
+        { label: `build:${r.key}`, phase: 'Build', isolation: 'worktree', schema: BUILD_SCHEMA }),
 
-    // ---- checker：独立校验，重跑命令 + 反驳语义 ----
-    (build, r) => agent(
-      `你是独立校验者。先读 ${RULES} 了解约束，再读冻结 DoD 文件 ${RUN}/dod/${r.key}.json，对需求 ${r.key} 逐条判定，不得采信 maker 自评。
-       命令档(test/build/lint/fe)：实际重跑 cmd，看 exit code，贴关键输出当 evidence。
-       语义档(api/scope)：核验证据并主动尝试反驳；证据不足即判 fail。
-       maker 自评（仅参考）：${JSON.stringify(build?.selfReport ?? [])}
-       返回每条 verdict(pass/fail)+evidence(其中 id 对应 DoD 的 criteria.id)，以及校验中新发现的 issue。`,
-      { label: `verify:${r.key}`, phase: 'Verify', schema: VERDICT_SCHEMA })
-  )
+      // ---- checker：独立校验，重跑命令 + 反驳语义 ----
+      (build, r) => agent(
+        `你是独立校验者。先读 ${RULES} 了解约束，再读冻结 DoD 文件 ${RUN}/dod/${r.key}.json，对需求 ${r.key} 逐条判定，不得采信 maker 自评。
+         命令档(test/build/lint/fe)：实际重跑 cmd，看 exit code，贴关键输出当 evidence。
+         语义档(api/scope)：核验证据并主动尝试反驳；证据不足即判 fail。
+         maker 自评（仅参考）：${JSON.stringify(build?.selfReport ?? [])}
+         返回每条 verdict(pass/fail)+evidence(其中 id 对应 DoD 的 criteria.id)，以及校验中新发现的 issue。`,
+        { label: `verify:${r.key}`, phase: 'Verify', schema: VERDICT_SCHEMA })
+    )
+    results.push(...wr)
+  }
 
   // 汇总：合并 issue（按 external_key 去重，新状态覆盖旧）
   const fresh = results.filter(Boolean).flatMap(v => v.issues ?? [])

@@ -12,6 +12,10 @@ You hand it a Feishu document that records, per requirement, the **business flow
 
 State and rules are **externalized** (files + Feishu), so a run survives a crash: re-running the same doc **resumes from the last round** instead of starting over, and every agent obeys a shared, self-growing rules file.
 
+Two more flow optimizations:
+- **Q&A loop for user-answerable issues** — before building, issues that need a human decision (spec-questions, blockers needing external input) are surfaced to you as questions; each answer is saved back as a **child record** (linked via `parent_key`) and the question is resolved, so every decision is traceable on the board and visible to the build agents.
+- **Dependency waves** — requirements are grouped into ordered waves; independent ones run **in parallel**, dependent ones are sequenced into later waves instead of being blindly parallelized.
+
 > Design principle: a loop is only as trustworthy as its **idempotent write-back**, its **convergence guarantee**, and its **externalized memory**. All three are pinned down with a tiny bit of deterministic code (the Go bridge + the round cap + the state files), not left to model judgement.
 
 ## Layout
