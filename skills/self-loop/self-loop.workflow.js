@@ -92,9 +92,9 @@ function ISSUE() {
     properties: {
       external_key: { type: 'string', description: '幂等键，如 REQ-1#issue-2' },
       requirement: { type: 'string' }, title: { type: 'string' },
-      type: { type: 'string', enum: ['bug', 'gap', 'blocker', 'spec-question'] },
-      status: { type: 'string', enum: ['open', 'in_progress', 'verifying', 'resolved', 'wont_fix'] },
-      severity: { type: 'string', enum: ['p0', 'p1', 'p2'] },
+      type: { type: 'string', enum: ['缺陷', '缺口', '阻塞', '待澄清'] },
+      status: { type: 'string', enum: ['待处理', '进行中', '待评审', '已完成', '不做'] },
+      severity: { type: 'string', enum: ['高', '中', '低'] },
       acceptance_ref: { type: 'string' }, evidence: { type: 'string' },
     },
   }
@@ -140,7 +140,7 @@ if (boot.resume && (boot.requirements?.length ?? 0) > 0) {
     else {
       log(`⚠ ${r.key} 越界(${g.reason}) → 标 spec-question，本轮不实现`)
       outOfScope.push({ external_key: `${r.key}#scope`, requirement: r.key, title: r.title,
-        type: 'spec-question', status: 'open', evidence: g.reason })
+        type: '待澄清', status: '待处理', evidence: g.reason })
     }
   }
 
@@ -210,7 +210,7 @@ while (round < MAX_ROUNDS) {
          在隔离 worktree 内推进需求 ${r.key} 的实现，目标是让该 DoD 逐条达标。
          走本项目的 SDLC/构建流程（若装了 /sdlc 之类 skill 则用之）。
          完成质量门后 git 提交、推送、开/更新 PR（分支 self-loop/${r.key}-*）。
-         已知 open issue（与本需求相关的请修复并标 resolved）：${JSON.stringify(openIssues.filter(i => i.requirement === r.key && i.status !== 'resolved'))}
+         已知 open issue（与本需求相关的请修复并标已完成）：${JSON.stringify(openIssues.filter(i => i.requirement === r.key && i.status !== '已完成'))}
          【硬护栏】禁止：改需求正文、改冻结 DoD、部署生产、读写 secret、合并默认分支(main)、覆盖非本任务脏改动。
          返回每条 DoD 自评 + 本轮新发现 issue（external_key 用 ${r.key}#issue-N）。`,
         { label: `build:${r.key}`, phase: 'Build', isolation: 'worktree', schema: BUILD_SCHEMA }),
@@ -230,17 +230,17 @@ while (round < MAX_ROUNDS) {
   // 汇总：合并 issue（按 external_key 去重，新状态覆盖旧）
   const fresh = results.filter(Boolean).flatMap(v => v.issues ?? [])
   openIssues = dedupeByKey([...openIssues, ...fresh])
-  // checker 判 pass 的标准 → 关联 issue 标 resolved
+  // checker 判 pass 的标准 → 关联 issue 标已完成
   for (const v of results.filter(Boolean)) {
     const passed = new Set((v.verdicts ?? []).filter(c => c.pass).map(c => c.id))
     for (const i of openIssues) {
-      if (i.requirement === v.requirement && passed.has(i.acceptance_ref)) i.status = 'resolved'
+      if (i.requirement === v.requirement && passed.has(i.acceptance_ref)) i.status = '已完成'
     }
   }
 
   const allGreen = results.filter(Boolean).length === requirements.length &&
     results.filter(Boolean).every(v => (v.verdicts ?? []).length > 0 && v.verdicts.every(c => c.pass))
-  const noOpen = openIssues.every(i => i.status === 'resolved' || i.status === 'wont_fix')
+  const noOpen = openIssues.every(i => i.status === '已完成' || i.status === '不做')
   converged = allGreen && noOpen
 
   // —— 状态外置（断点续跑）：回写飞书看板 + 写 progress 检查点 ——
@@ -260,14 +260,14 @@ while (round < MAX_ROUNDS) {
   }
 
   if (converged) { log(`✅ Round ${round}: 全部 DoD 达标且无 open issue，收敛`); break }
-  log(`Round ${round} 未收敛：剩 ${openIssues.filter(i => i.status === 'open' || i.status === 'in_progress').length} 个未关 issue`)
+  log(`Round ${round} 未收敛：剩 ${openIssues.filter(i => i.status === '待处理' || i.status === '进行中').length} 个未关 issue`)
 }
 
 return {
   rounds: round,
   converged,
   inScope: requirements.length,
-  openIssues: openIssues.filter(i => i.status !== 'resolved' && i.status !== 'wont_fix'),
+  openIssues: openIssues.filter(i => i.status !== '已完成' && i.status !== '不做'),
   resumeHint: converged ? null : `未收敛。重跑同一文档(${docId})会自动从 ${RUN} 续跑，无需重新冻结 DoD。`,
 }
 

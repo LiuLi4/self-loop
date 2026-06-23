@@ -49,6 +49,8 @@ func main() {
 		runResolveWiki(args)
 	case "ensure-board":
 		runEnsureBoard(args)
+	case "field-set-options":
+		runFieldSetOptions(args)
 	case "issues-list":
 		runIssuesList(args)
 	case "issue-upsert":
@@ -68,6 +70,7 @@ func usage() {
   loop-bridge sheet-dump   --sheet <spreadsheet_token>
   loop-bridge resolve-wiki --node <wiki_node_token>
   loop-bridge ensure-board --app <app_token> [--table <table_id>]
+  loop-bridge field-set-options --app <app_token> --table <table_id> --field <name> --options a,b,c
   loop-bridge issues-list  --app <app_token> --table <table_id>
   loop-bridge issue-upsert --app <app_token> --table <table_id> [--key-field external_key] < records.json
 
@@ -218,9 +221,9 @@ var boardFields = []fieldSpec{
 	{"external_key", 1, nil},
 	{"requirement", 1, nil},
 	{"title", 1, nil},
-	{"type", 3, []string{"bug", "gap", "blocker", "spec-question"}},
-	{"status", 3, []string{"open", "in_progress", "verifying", "resolved", "wont_fix"}},
-	{"severity", 3, []string{"p0", "p1", "p2"}},
+	{"type", 3, []string{"缺陷", "缺口", "阻塞", "待澄清"}},
+	{"status", 3, []string{"待处理", "进行中", "待评审", "已完成", "不做"}},
+	{"severity", 3, []string{"高", "中", "低"}},
 	{"acceptance_ref", 1, nil},
 	{"evidence", 1, nil},
 	{"updated_round", 2, nil},
@@ -265,6 +268,87 @@ func runEnsureBoard(args map[string]string) {
 		created = append(created, f.Name)
 	}
 	writeJSON(map[string]any{"app": app, "table": table, "created": created, "fields_total": len(boardFields)})
+}
+
+// ---------------------------------------------------------------------------
+// 子命令：field-set-options（更新单选字段的选项，用于本地化等）
+// ---------------------------------------------------------------------------
+
+// runFieldSetOptions 把指定单选字段的选项替换为给定列表。
+// 注意：替换会使持有旧选项的记录该字段变空，调用方应紧接着把记录改写为新选项值。
+func runFieldSetOptions(args map[string]string) {
+	app, table, field := args["app"], args["table"], args["field"]
+	opts := args["options"]
+	if app == "" || table == "" || field == "" || opts == "" {
+		fmt.Fprintln(os.Stderr, "需要 --app --table --field --options a,b,c")
+		os.Exit(2)
+	}
+	names := strings.Split(opts, ",")
+	c := mustClient()
+	metas, err := c.listFieldsMeta(app, table)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "列字段失败:", err)
+		os.Exit(1)
+	}
+	var fid string
+	var ftype int
+	for _, m := range metas {
+		if m.Name == field {
+			fid, ftype = m.ID, m.Type
+		}
+	}
+	if fid == "" {
+		fmt.Fprintf(os.Stderr, "未找到字段 %q\n", field)
+		os.Exit(2)
+	}
+	if err := c.setFieldOptions(app, table, fid, field, ftype, names); err != nil {
+		fmt.Fprintln(os.Stderr, "更新选项失败:", err)
+		os.Exit(1)
+	}
+	writeJSON(map[string]any{"field": field, "options": names})
+}
+
+type fieldMeta2 struct {
+	ID   string
+	Name string
+	Type int
+}
+
+func (c *client) listFieldsMeta(app, table string) ([]fieldMeta2, error) {
+	path := fmt.Sprintf("/open-apis/bitable/v1/apps/%s/tables/%s/fields?page_size=100",
+		url.PathEscape(app), url.PathEscape(table))
+	data, err := c.doAPI(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Items []struct {
+			FieldID   string `json:"field_id"`
+			FieldName string `json:"field_name"`
+			Type      int    `json:"type"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	res := make([]fieldMeta2, 0, len(out.Items))
+	for _, it := range out.Items {
+		res = append(res, fieldMeta2{ID: it.FieldID, Name: it.FieldName, Type: it.Type})
+	}
+	return res, nil
+}
+
+func (c *client) setFieldOptions(app, table, fieldID, fieldName string, fieldType int, names []string) error {
+	opts := make([]map[string]any, 0, len(names))
+	for _, n := range names {
+		opts = append(opts, map[string]any{"name": strings.TrimSpace(n)})
+	}
+	path := fmt.Sprintf("/open-apis/bitable/v1/apps/%s/tables/%s/fields/%s",
+		url.PathEscape(app), url.PathEscape(table), url.PathEscape(fieldID))
+	body := map[string]any{"field_name": fieldName, "type": fieldType,
+		"property": map[string]any{"options": opts}}
+	_, err := c.doAPI(http.MethodPut, path, body)
+	return err
 }
 
 // ---------------------------------------------------------------------------
