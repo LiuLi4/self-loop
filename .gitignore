@@ -11,3 +11,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# compiled bridge binary
+/loop-bridge/loop-bridge
