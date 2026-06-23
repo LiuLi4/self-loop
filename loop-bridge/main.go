@@ -225,6 +225,7 @@ var boardFields = []fieldSpec{
 	{"evidence", 1, nil},
 	{"updated_round", 2, nil},
 	{"parent_key", 1, nil}, // 子记录(如用户答复)挂到父 issue 的 external_key
+	{"assignee", 1, nil},   // 负责人：人或 agent（multica 风格"队友"），如 user / build:REQ-1 / checker
 }
 
 func runEnsureBoard(args map[string]string) {

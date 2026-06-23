@@ -77,8 +77,8 @@ func TestPlanUpsert(t *testing.T) {
 }
 
 func TestBoardFields(t *testing.T) {
-	if len(boardFields) != 10 {
-		t.Fatalf("看板应有 10 个字段, got %d", len(boardFields))
+	if len(boardFields) != 11 {
+		t.Fatalf("看板应有 11 个字段, got %d", len(boardFields))
 	}
 	for _, f := range boardFields {
 		if f.Type == 3 && len(f.Options) == 0 {

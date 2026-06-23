@@ -140,6 +140,22 @@ Workflow({
 
 脚本会自己跑完 Intake → loop(Build→Verify→Sync) → 收敛，期间后台运行，完成时回通知。
 
+## 3.5 Review 门（multica 风格：看 diff + 摘要，Approve / Request-changes）
+
+把看板当成 human+agent 共用的看板，**状态即列**：Backlog(`open`) → In-progress(`in_progress`) → **Review(`verifying`)** → Done(`resolved`)；Blocked = `blocker` 型 open。agent 是"队友"：每条 issue 记 `assignee`（如 `build:REQ-1` / `checker` / `user`），完成后主动进 Review、主动报 blocker。
+
+每个需求经 build+checker 跑绿、开出 PR 后，**不要直接判完成**——先进 Review 门，像 multica 那样给用户一张 **review 卡**：
+
+1. **展示**：改动 `git diff --stat origin/main..<branch>` + checker 逐条 verdict + maker 一句话摘要 + 关联 issue + PR/MR 链接。
+2. **问**（AskUserQuestion）：`Approve` / `Request changes(附意见)` / `Hold(先放着)`。
+3. **据答幂等写回看板**：
+   - **Approve** → 该需求 `#intake` 置 `resolved`(Done)、`assignee=user`；再单独问是否要执行 merge（外发动作，分开确认）。
+   - **Request changes** → 用户意见写成**子记录**（`external_key=<key>#review-rN`、`parent_key=<key>`、`type=gap`、`assignee=user`、evidence=意见），父 `#intake` 退回 `in_progress`，下一轮 build 带上反馈重做。
+   - **Hold** → 留 `verifying`，记 evidence。
+4. 多个需求同时到 Review 时，**一次性把多张卡一起呈现**（一个 AskUserQuestion 多道题），别让用户逐个等。
+
+> 对应 multica：Review 列 + Approve/Request-changes 审批门；agent 当队友(assignee)、主动报 blocker；成功经验沉淀进 Rules `## Learned`（≈ multica 的 compound skills）。
+
 ## 4. 汇报
 
 脚本返回 `{ rounds, converged, inScope, openIssues }`。据此汇报：收敛与否 / 跑了几轮 / 纳入几个 in-scope 需求；看板剩余 open issue（`converged=false` 表示到 `maxRounds` 仍未全绿，附剩余 issue 交人工）；越界(spec-question)需求清单——**未**被实现，需人工决定是否立新 spec。
