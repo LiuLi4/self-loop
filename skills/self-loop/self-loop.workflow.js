@@ -1,43 +1,45 @@
 export const meta = {
   name: 'self-loop-engineering',
-  description: '飞书需求驱动的自治开发 loop：拉需求→冻结DoD→worktree并行实现→独立checker对照DoD校验→issue幂等回写飞书→loop-until-dry',
+  description: '飞书需求驱动的自治开发 loop：拉需求→冻结DoD→worktree并行实现→独立checker校验→issue回写飞书→loop-until-dry，状态外置可断点续跑，规则记忆随轮沉淀',
   phases: [
-    { title: 'Intake', detail: 'doc-dump 拉需求 + (可选)范围守卫 + 冻结 DoD' },
-    { title: 'Build', detail: '每需求独立 worktree 实现' },
+    { title: 'Intake', detail: 'boot 续跑探测 + 拉需求 + (可选)范围守卫 + 冻结 DoD' },
+    { title: 'Build', detail: '读规则+DoD，每需求独立 worktree 实现' },
     { title: 'Verify', detail: 'checker 重跑命令档 + 反驳语义档' },
-    { title: 'Sync', detail: 'issue 幂等回写飞书 Bitable 看板' },
+    { title: 'Sync', detail: 'issue 幂等回写飞书 + 写检查点 + 沉淀规则' },
   ],
 }
 
-// args = { docId, app, table, maxRounds?, runDir?, bridgeCmd?, scopeRule? }  —— 由 SKILL.md 调用 Workflow 时传入
+// args = { docId, app, table, maxRounds?, runDir?, bridgeCmd?, scopeRule?, rulesPath? }
 const docId = args?.docId
 const app = args?.app
 const table = args?.table
 const MAX_ROUNDS = args?.maxRounds ?? 6
 const RUN = args?.runDir ?? `.self-loop/run/${(docId ?? 'run').slice(0, 12)}`
-// loop-bridge 调用方式：默认假设已 `go install` 到 PATH；也可传 'go run ./loop-bridge' 等
 const BRIDGE = args?.bridgeCmd ?? 'loop-bridge'
-// 可选的范围约束（自然语言）。提供则做边界守卫，越界需求只标 spec-question 不实现；不提供则全部视为 in-scope。
 const SCOPE_RULE = args?.scopeRule ?? ''
+// Rules（策略记忆）：所有 maker/checker 开工前必读；loop 会把历轮教训追加到它的 "## Learned" 节
+const RULES = args?.rulesPath ?? 'self-loop.rules.md'
 if (!docId || !app || !table) throw new Error('缺少 args.docId / args.app / args.table')
 
+// 外置状态文件（断点续跑用）：
+//   meta.json     = { docId, requirements:[...] }      —— 首次 intake 写一次
+//   progress.json = { round, converged }               —— 每轮重写
+//   dod/<key>.json= 冻结的验收契约                       —— 首次 intake 写，run 内只读
+const META = `${RUN}/meta.json`
+const PROGRESS = `${RUN}/progress.json`
+
 // ---- schemas ----
-const REQ_SCHEMA = {
-  type: 'object', required: ['requirements'],
-  properties: { requirements: { type: 'array', items: {
-    type: 'object', required: ['key', 'title', 'flow', 'apis'],
-    properties: {
-      key: { type: 'string', description: '稳定需求 id，如 REQ-1' },
-      title: { type: 'string' },
-      flow: { type: 'string', description: '业务流程摘要' },
-      apis: { type: 'array', items: { type: 'string' }, description: '涉及接口清单' },
-    },
-  } } },
+const BOOT_SCHEMA = {
+  type: 'object', required: ['resume'],
+  properties: {
+    resume: { type: 'boolean', description: '是否检测到可续跑的既有 run（meta.json + dod 存在）' },
+    lastRound: { type: 'integer', description: 'progress.json 里的已完成轮次，无则 0' },
+    requirements: { type: 'array', items: REQ() },
+    boardIssues: { type: 'array', items: ISSUE(), description: '从飞书看板载入的现有 issue' },
+  },
 }
-const BOUNDARY_SCHEMA = {
-  type: 'object', required: ['inScope', 'reason'],
-  properties: { inScope: { type: 'boolean' }, reason: { type: 'string' } },
-}
+const REQ_SCHEMA = { type: 'object', required: ['requirements'], properties: { requirements: { type: 'array', items: REQ() } } }
+const BOUNDARY_SCHEMA = { type: 'object', required: ['inScope', 'reason'], properties: { inScope: { type: 'boolean' }, reason: { type: 'string' } } }
 const DOD_SCHEMA = {
   type: 'object', required: ['requirement', 'criteria'],
   properties: {
@@ -54,8 +56,7 @@ const DOD_SCHEMA = {
 const BUILD_SCHEMA = {
   type: 'object', required: ['requirement', 'selfReport', 'issues'],
   properties: {
-    requirement: { type: 'string' },
-    branch: { type: 'string' }, prUrl: { type: 'string' },
+    requirement: { type: 'string' }, branch: { type: 'string' }, prUrl: { type: 'string' },
     selfReport: { type: 'array', items: { type: 'object', properties: {
       id: { type: 'string' }, pass: { type: 'boolean' }, evidence: { type: 'string' } } } },
     issues: { type: 'array', items: ISSUE() },
@@ -69,6 +70,16 @@ const VERDICT_SCHEMA = {
       id: { type: 'string' }, pass: { type: 'boolean' }, evidence: { type: 'string' } } } },
     issues: { type: 'array', items: ISSUE() },
   },
+}
+function REQ() {
+  return {
+    type: 'object', required: ['key', 'title', 'flow', 'apis'],
+    properties: {
+      key: { type: 'string', description: '稳定需求 id，如 REQ-1' }, title: { type: 'string' },
+      flow: { type: 'string', description: '业务流程摘要' },
+      apis: { type: 'array', items: { type: 'string' }, description: '涉及接口清单' },
+    },
+  }
 }
 function ISSUE() {
   return {
@@ -85,84 +96,105 @@ function ISSUE() {
 }
 
 // ============================================================
-// Intake：拉需求 →（可选）范围守卫 → 冻结 DoD
+// Intake：先 boot 探测续跑；非续跑才解析文档 + 冻结
 // ============================================================
 phase('Intake')
-const dump = await agent(
-  `运行 \`${BRIDGE} doc-dump --doc ${docId}\`，它输出文档全部 block 的扁平文本 JSON。
-   据此把文档语义切分成"需求"数组：每个需求含 key（稳定 id，如 REQ-1）、title、flow（业务流程）、apis（接口清单）。
-   仅返回结构化结果。`,
-  { label: 'intake:parse', phase: 'Intake', schema: REQ_SCHEMA })
+const boot = await agent(
+  `自治 loop 启动探测（外置状态在目录 ${RUN}）：
+   1) 若 ${META} 存在则读出其中的 requirements（这是断点续跑的依据）；并读 ${PROGRESS} 取 round（无则 0）。
+   2) 列出 ${RUN}/dod/ 下已冻结的 DoD 文件，确认哪些需求已冻结。
+   3) 运行 \`${BRIDGE} issues-list --app ${app} --table ${table}\` 拉取飞书看板现有 issue（恢复 issue 记忆）。
+   判定 resume：当 ${META} 存在且 requirements 非空且对应 dod 文件齐全时 resume=true。
+   返回 {resume, lastRound, requirements, boardIssues}。`,
+  { label: 'intake:boot', phase: 'Intake', schema: BOOT_SCHEMA })
 
-const inScope = []
-const outOfScope = [] // 越界需求保留为 spec-question issue 回写
-for (const r of dump.requirements) {
-  if (!SCOPE_RULE) { inScope.push(r); continue }
-  const g = await agent(
-    `判定需求是否落在本项目允许的范围内。范围约束：${SCOPE_RULE}
-     需求：${JSON.stringify(r)}。若超出范围（需新建范围外 spec 或属其它领域）→ inScope=false。`,
-    { label: `intake:boundary:${r.key}`, phase: 'Intake', schema: BOUNDARY_SCHEMA })
-  if (g.inScope) { inScope.push(r) }
-  else {
-    log(`⚠ ${r.key} 越界(${g.reason}) → 标 spec-question，本轮不实现`)
-    outOfScope.push({ external_key: `${r.key}#scope`, requirement: r.key, title: r.title,
-      type: 'spec-question', status: 'open', evidence: g.reason })
+let requirements, startRound, openIssues
+if (boot.resume && (boot.requirements?.length ?? 0) > 0) {
+  requirements = boot.requirements
+  startRound = boot.lastRound ?? 0
+  openIssues = boot.boardIssues ?? []
+  log(`↻ 续跑：从第 ${startRound + 1} 轮继续，${requirements.length} 个需求，看板载入 ${openIssues.length} 个 issue`)
+} else {
+  // —— 全新 intake：解析文档 → 范围守卫 → 冻结 DoD → 写 meta ——
+  const dump = await agent(
+    `运行 \`${BRIDGE} doc-dump --doc ${docId}\`，它输出文档全部 block 的扁平文本 JSON。
+     据此把文档语义切分成"需求"数组：每个需求含 key（稳定 id，如 REQ-1）、title、flow、apis。仅返回结构化结果。`,
+    { label: 'intake:parse', phase: 'Intake', schema: REQ_SCHEMA })
+
+  const inScope = []
+  const outOfScope = []
+  for (const r of dump.requirements) {
+    if (!SCOPE_RULE) { inScope.push(r); continue }
+    const g = await agent(
+      `判定需求是否落在本项目允许的范围内。范围约束：${SCOPE_RULE}
+       需求：${JSON.stringify(r)}。若超出范围 → inScope=false。`,
+      { label: `intake:boundary:${r.key}`, phase: 'Intake', schema: BOUNDARY_SCHEMA })
+    if (g.inScope) inScope.push(r)
+    else {
+      log(`⚠ ${r.key} 越界(${g.reason}) → 标 spec-question，本轮不实现`)
+      outOfScope.push({ external_key: `${r.key}#scope`, requirement: r.key, title: r.title,
+        type: 'spec-question', status: 'open', evidence: g.reason })
+    }
   }
+
+  if (inScope.length === 0) {
+    log('无 in-scope 需求，仅回写越界 spec-question 后结束')
+    await syncIssues(outOfScope, 0)
+    return { rounds: 0, converged: true, inScope: 0, openIssues: outOfScope }
+  }
+
+  // 冻结 DoD（写 RUN/dod/<key>.json）+ 写 meta.json（外置需求集，供续跑）
+  await parallel(inScope.map(r => () =>
+    agent(
+      `为需求 ${r.key} 生成机器可校验的 DoD 验收契约，写入文件 ${RUN}/dod/${r.key}.json。
+       每条标准必须可命令判定(test/build/lint/fe，给出 cmd 与 must=exit 0)或可证据核验(api 接口全覆盖 / scope)。
+       用本项目实际的质量门命令。需求+接口：${JSON.stringify(r)}`,
+      { label: `intake:dod:${r.key}`, phase: 'Intake', schema: DOD_SCHEMA })))
+  await agent(
+    `把以下内容原样写入 ${META}（用于断点续跑）：${JSON.stringify({ docId, requirements: inScope })}`,
+    { label: 'intake:meta', phase: 'Intake' })
+
+  requirements = inScope
+  startRound = 0
+  openIssues = [...outOfScope]
 }
 
-if (inScope.length === 0) {
-  log('无 in-scope 需求，仅回写越界 spec-question 后结束')
-  await syncIssues(outOfScope, 0)
-  return { rounds: 0, converged: true, inScope: 0, openIssues: outOfScope }
-}
-
-// 冻结每个需求的 DoD（写入 RUN/dod/<key>.json，run 内只读）
-const dods = await parallel(inScope.map(r => () =>
-  agent(
-    `为需求 ${r.key} 生成机器可校验的 DoD 验收契约，并写入文件 ${RUN}/dod/${r.key}.json。
-     每条标准必须可命令判定(test/build/lint/fe，给出 cmd 与 must=exit 0)或可证据核验(api 接口全覆盖 / scope 落在范围内)。
-     用本项目实际的质量门命令（如 测试/构建/lint/前端构建）。
-     需求+接口：${JSON.stringify(r)}`,
-    { label: `intake:dod:${r.key}`, phase: 'Intake', schema: DOD_SCHEMA })))
-const dodByKey = Object.fromEntries(dods.filter(Boolean).map(d => [d.requirement, d]))
-
 // ============================================================
-// loop-until-dry
+// loop-until-dry（round 从 startRound 续）
 // ============================================================
-let round = 0
-let openIssues = [...outOfScope]
+let round = startRound
+let converged = false
 
 while (round < MAX_ROUNDS) {
   round++
-  log(`=== Round ${round}: ${inScope.length} 需求并行 ===`)
+  log(`=== Round ${round}: ${requirements.length} 需求并行 ===`)
 
-  const results = await pipeline(inScope,
-    // ---- maker：worktree 内实现 ----
+  const results = await pipeline(requirements,
+    // ---- maker：先读规则 + 冻结 DoD（从磁盘），再实现 ----
     (r) => agent(
-      `在隔离 worktree 内，对需求 ${r.key} 推进实现，目标是让冻结的 DoD 逐条达标。
-       DoD：${JSON.stringify(dodByKey[r.key] ?? {})}
-       走本项目的 SDLC/构建流程（若安装了 /sdlc 之类的 skill 则用之），spec 直接取自需求(${r.key})的业务流程与接口清单。
-       完成质量门后在 git 提交、推送、开/更新 PR（分支 self-loop/${r.key}-*）。
-       已知 open issue（若与本需求相关请修复并标 resolved）：${JSON.stringify(openIssues.filter(i => i.requirement === r.key))}
-       【硬护栏】禁止：改需求正文、改冻结 DoD、部署生产、读写 secret、合并默认分支(main)、覆盖非本任务的脏改动。
+      `【先读规则】开工前先读 ${RULES}（含历轮沉淀的 "## Learned" 教训），严格遵守其中所有约束。
+       【读 DoD】读取冻结的验收契约文件 ${RUN}/dod/${r.key}.json（不得修改它）。
+       在隔离 worktree 内推进需求 ${r.key} 的实现，目标是让该 DoD 逐条达标。
+       走本项目的 SDLC/构建流程（若装了 /sdlc 之类 skill 则用之）。
+       完成质量门后 git 提交、推送、开/更新 PR（分支 self-loop/${r.key}-*）。
+       已知 open issue（与本需求相关的请修复并标 resolved）：${JSON.stringify(openIssues.filter(i => i.requirement === r.key && i.status !== 'resolved'))}
+       【硬护栏】禁止：改需求正文、改冻结 DoD、部署生产、读写 secret、合并默认分支(main)、覆盖非本任务脏改动。
        返回每条 DoD 自评 + 本轮新发现 issue（external_key 用 ${r.key}#issue-N）。`,
       { label: `build:${r.key}`, phase: 'Build', isolation: 'worktree', schema: BUILD_SCHEMA }),
 
     // ---- checker：独立校验，重跑命令 + 反驳语义 ----
     (build, r) => agent(
-      `你是独立校验者，对需求 ${r.key} 对照冻结 DoD 逐条判定，不得采信 maker 自评。
-       DoD：${JSON.stringify(dodByKey[r.key] ?? {})}
+      `你是独立校验者。先读 ${RULES} 了解约束，再读冻结 DoD 文件 ${RUN}/dod/${r.key}.json，对需求 ${r.key} 逐条判定，不得采信 maker 自评。
        命令档(test/build/lint/fe)：实际重跑 cmd，看 exit code，贴关键输出当 evidence。
        语义档(api/scope)：核验证据并主动尝试反驳；证据不足即判 fail。
        maker 自评（仅参考）：${JSON.stringify(build?.selfReport ?? [])}
-       返回每条 verdict(pass/fail)+evidence，以及校验中新发现的 issue。`,
+       返回每条 verdict(pass/fail)+evidence(其中 id 对应 DoD 的 criteria.id)，以及校验中新发现的 issue。`,
       { label: `verify:${r.key}`, phase: 'Verify', schema: VERDICT_SCHEMA })
   )
 
-  // 汇总本轮：合并 issue（按 external_key 去重，新状态覆盖旧）
+  // 汇总：合并 issue（按 external_key 去重，新状态覆盖旧）
   const fresh = results.filter(Boolean).flatMap(v => v.issues ?? [])
   openIssues = dedupeByKey([...openIssues, ...fresh])
-
   // checker 判 pass 的标准 → 关联 issue 标 resolved
   for (const v of results.filter(Boolean)) {
     const passed = new Set((v.verdicts ?? []).filter(c => c.pass).map(c => c.id))
@@ -171,20 +203,37 @@ while (round < MAX_ROUNDS) {
     }
   }
 
-  await syncIssues(openIssues, round)
-
-  const allGreen = results.filter(Boolean).length === inScope.length &&
+  const allGreen = results.filter(Boolean).length === requirements.length &&
     results.filter(Boolean).every(v => (v.verdicts ?? []).length > 0 && v.verdicts.every(c => c.pass))
   const noOpen = openIssues.every(i => i.status === 'resolved' || i.status === 'wont_fix')
-  if (allGreen && noOpen) { log(`✅ Round ${round}: 全部 DoD 达标且无 open issue，收敛`); break }
+  converged = allGreen && noOpen
+
+  // —— 状态外置（断点续跑）：回写飞书看板 + 写 progress 检查点 ——
+  await syncIssues(openIssues, round)
+  await agent(`把以下内容原样写入 ${PROGRESS}（检查点）：${JSON.stringify({ round, converged })}`,
+    { label: `checkpoint:r${round}`, phase: 'Sync' })
+
+  // —— 规则记忆沉淀：把本轮系统性教训追加到 RULES 的 "## Learned" 节 ——
+  const fails = results.filter(Boolean).flatMap(v => (v.verdicts ?? []).filter(c => !c.pass))
+  if (fails.length > 0 || fresh.length > 0) {
+    await agent(
+      `审视本轮 checker 的失败判定与新发现 issue，提炼**可复用的系统性教训**（非一次性 bug；如"某类接口必须先写契约测试"）。
+       若有，用 markdown 列表项 append 到 ${RULES} 文件的 "## Learned" 节（每条一行，带 [r${round}] 前缀）；不要重复已存在的教训；无则不写。
+       失败判定：${JSON.stringify(fails.slice(0, 20))}
+       仅返回追加了几条。`,
+      { label: `learn:r${round}`, phase: 'Sync' })
+  }
+
+  if (converged) { log(`✅ Round ${round}: 全部 DoD 达标且无 open issue，收敛`); break }
   log(`Round ${round} 未收敛：剩 ${openIssues.filter(i => i.status === 'open' || i.status === 'in_progress').length} 个未关 issue`)
 }
 
 return {
   rounds: round,
-  converged: round < MAX_ROUNDS,
-  inScope: inScope.length,
+  converged,
+  inScope: requirements.length,
   openIssues: openIssues.filter(i => i.status !== 'resolved' && i.status !== 'wont_fix'),
+  resumeHint: converged ? null : `未收敛。重跑同一文档(${docId})会自动从 ${RUN} 续跑，无需重新冻结 DoD。`,
 }
 
 // ---- helpers ----

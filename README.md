@@ -10,7 +10,9 @@ You hand it a Feishu document that records, per requirement, the **business flow
 4. **Sync** — every issue found is idempotently written back to a Feishu Bitable board with a status.
 5. **Loop-until-dry** — repeats until *all* DoD criteria pass and no issue is open (or a round cap is hit, then it stops and hands off to a human).
 
-> Design principle: a loop is only as trustworthy as its **idempotent write-back** and its **convergence guarantee**. Both are pinned down with a tiny bit of deterministic code (the Go bridge + the round cap), not left to model judgement.
+State and rules are **externalized** (files + Feishu), so a run survives a crash: re-running the same doc **resumes from the last round** instead of starting over, and every agent obeys a shared, self-growing rules file.
+
+> Design principle: a loop is only as trustworthy as its **idempotent write-back**, its **convergence guarantee**, and its **externalized memory**. All three are pinned down with a tiny bit of deterministic code (the Go bridge + the round cap + the state files), not left to model judgement.
 
 ## Layout
 
@@ -19,10 +21,24 @@ self-loop/
 ├── skills/self-loop/
 │   ├── SKILL.md                 # the skill entrypoint (preflight, env guidance, hands off to the workflow)
 │   └── self-loop.workflow.js    # orchestration: pipeline + worktree isolation + loop-until-dry
+│   └── self-loop.rules.example.md  # rules-memory template (copy to <repo>/self-loop.rules.md)
 └── loop-bridge/                 # Feishu Open API bridge CLI (Go stdlib only, no third-party deps)
     ├── main.go                  # doc-dump / issues-list / issue-upsert
     └── main_test.go
 ```
+
+## Rules & Memory (externalized state, resumable)
+
+self-loop keeps two kinds of memory outside the running process — nothing important lives only in the orchestrator's RAM:
+
+- **Rules (policy memory)** — `self-loop.rules.md` in your repo: hard constraints + project conventions + a `## Learned` section the loop **auto-appends** systemic lessons to each round. Every maker/checker reads it before acting, so the loop gets smarter across runs.
+- **State (execution memory, resumable)**:
+  - `.self-loop/run/<id>/meta.json` (requirement set), `dod/*.json` (frozen acceptance contracts), `progress.json` (round) — written at intake/each round;
+  - the **Feishu Bitable board** is the durable source of truth for issue status;
+  - re-running the same doc makes the workflow's *boot* step read all of that back and **continue from the last round** — it does not re-parse the doc or re-freeze the DoD;
+  - within a session you can also layer Claude Code's native `Workflow({resumeFromRunId})` (replays cached agent results). The two resume layers compose: native covers in-session, files+board cover cross-session.
+
+To start fresh, delete `.self-loop/run/<id>/`.
 
 ## Prerequisites
 
@@ -41,6 +57,9 @@ go install github.com/LiuLi4/self-loop/loop-bridge@latest   # or: go build -o ~/
 
 # 2. make the skill available to Claude Code
 cp -r skills/self-loop ~/.claude/skills/                     # or into <your-repo>/.claude/skills/
+
+# 2b. seed the rules file in your target repo (agents read it before acting)
+cp skills/self-loop/self-loop.rules.example.md <your-repo>/self-loop.rules.md
 
 # 3. set local env vars (in ~/.zshrc, then `source` / open a new shell)
 export FEISHU_APP_ID=cli_xxxxxxxx

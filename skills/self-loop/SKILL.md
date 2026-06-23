@@ -35,6 +35,7 @@ description: >
 | `SELF_LOOP_MAX_ROUNDS` | 可选，收敛轮数上限，默认 6 | 否 |
 | `SELF_LOOP_SCOPE_RULE` | 可选，范围约束（自然语言）。设了才做边界守卫，越界需求只标 spec-question 不实现 | 否 |
 | `SELF_LOOP_BRIDGE_CMD` | 可选，loop-bridge 调用方式，默认 `loop-bridge`（已装到 PATH）；也可设 `go run /path/to/loop-bridge` | 否 |
+| `SELF_LOOP_RULES_PATH` | 可选，规则记忆文件路径，默认仓根 `self-loop.rules.md`（见下方 Rules & Memory） | 否 |
 
 **引导流程**：开跑前逐个检查必填变量（`FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_BITABLE_APP`/`FEISHU_BITABLE_TABLE`）。**只要有任一缺失，先停下来引导用户建立，不要带病启动**：
 
@@ -65,6 +66,19 @@ description: >
    返回 JSON（哪怕空数组）即通；报错则按错误信息修（loop-bridge 未装/权限/字段/网络），不要进入 loop。
    > 未安装 loop-bridge：`go install github.com/LiuLi4/self-loop/loop-bridge@latest`，或克隆本仓后 `go build -o ~/bin/loop-bridge ./loop-bridge`。
 3. **看板 schema**：Bitable 必须含字段 `external_key`(单行文本,唯一键)、`requirement`、`title`、`type`、`status`、`severity`、`acceptance_ref`、`evidence`、`updated_round`(数字)。缺字段先引导用户补（一次性）。
+4. **Rules 文件**：检查仓根 `self-loop.rules.md`（或 `$SELF_LOOP_RULES_PATH`）。不存在则引导用户从 `self-loop.rules.example.md` 复制一份并填上项目约定——所有 maker/checker 都会读它。
+5. **续跑探测**：检查 `.self-loop/run/<docId 前12位>/` 是否已有 `meta.json` + `dod/`。有则提示用户"检测到既有 run，将断点续跑（不重新冻结 DoD）"；这是正常的，确认后继续。
+
+## 2.5 Rules & Memory（规则记忆 + 状态外置 + 断点续跑）
+
+self-loop 的"记忆"分两层，都外置在文件 / 飞书，不依赖运行中进程的内存：
+
+- **Rules（策略记忆）** = `self-loop.rules.md`：硬约束 + 项目约定 + `## Learned`（loop 每轮把系统性教训自动追加进去）。每个 maker/checker 开工前必读。跨 run 持续生效、越用越聪明。
+- **State（执行记忆，可断点续跑）**：
+  - `.self-loop/run/<id>/meta.json` 存需求集、`dod/*.json` 存冻结验收契约、`progress.json` 存轮次——首次 intake 写入；
+  - **飞书 Bitable 看板**是 issue 状态的持久真相源；
+  - 重跑同一文档时，workflow 的 boot 阶段会读回 meta+progress+看板，**从断点轮次继续，不重新解析文档、不重新冻结 DoD**。
+  - 会话内崩溃/中断还可叠加 Workflow 工具自带的 `resumeFromRunId`（重放已完成 agent 的缓存）——两层 resume 互补：native 管会话内、文件+看板管跨会话。
 
 ## 3. 启动 loop（交给 Workflow）
 
@@ -79,9 +93,12 @@ Workflow({
     table: "<$FEISHU_BITABLE_TABLE>",
     maxRounds: <$SELF_LOOP_MAX_ROUNDS 或 6>,
     scopeRule: "<$SELF_LOOP_SCOPE_RULE，可空>",
-    bridgeCmd: "<$SELF_LOOP_BRIDGE_CMD 或 loop-bridge>"
+    bridgeCmd: "<$SELF_LOOP_BRIDGE_CMD 或 loop-bridge>",
+    rulesPath: "<$SELF_LOOP_RULES_PATH 或 self-loop.rules.md>"
   }
 })
+
+> 若上面探测到既有 run，**直接用同样的 args 再跑一次**即可——boot 阶段会自动续跑。要从干净状态重来，先删 `.self-loop/run/<id>/`。会话内中断想省 token，可改用 `Workflow({scriptPath, resumeFromRunId:"<上次 runId>"})`。
 ```
 
 > 注意：app/table 等值由你从环境变量读出后填进 args（Workflow 脚本本身不读 env）。凭据 `FEISHU_APP_ID/SECRET` 不进 args——它们由 loop-bridge 在子进程内自行从 env 读取。
@@ -106,4 +123,6 @@ Workflow({
 ## 相关文件
 
 - `loop-bridge/` — 飞书 Open API 桥接 CLI（doc-dump / issues-list / issue-upsert，Go 标准库，无第三方依赖，凭据只读 env）。
-- `self-loop.workflow.js` — 编排脚本（pipeline 并行 + worktree 隔离 + loop-until-dry）。
+- `self-loop.workflow.js` — 编排脚本（pipeline 并行 + worktree 隔离 + loop-until-dry + 续跑 + 规则沉淀）。
+- `self-loop.rules.example.md` — 规则记忆模板，复制为目标仓根 `self-loop.rules.md`。
+- 运行期外置状态：`.self-loop/run/<id>/{meta,progress}.json` 与 `dod/*.json`（断点续跑用，gitignore）。
