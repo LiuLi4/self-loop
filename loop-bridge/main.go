@@ -1,9 +1,11 @@
 // loop-bridge：self-loop 的飞书（Feishu / Lark）Open API 桥接 CLI。
 //
 // 只做"机械"读写，不含任何需求解析业务逻辑（需求切分交给编排层的 intake agent
-// 做语义处理）。三个子命令，全部 stdout 输出 JSON、stderr 输出错误：
+// 做语义处理）。子命令全部 stdout 输出 JSON、stderr 输出错误：
 //
-//	loop-bridge doc-dump    --doc <document_id>                          # 拉取文档全部 block 文本
+//	loop-bridge doc-dump    --doc <document_id> | --wiki <wiki_node_token>   # 拉取在线文档全部 block 文本
+//	    # --wiki：先把知识库节点 token 解析成底层 docx，再拉取（仅支持 obj_type=docx）
+//	loop-bridge resolve-wiki --node <wiki_node_token>                    # 仅解析 wiki 节点 → {obj_token, obj_type}
 //	loop-bridge issues-list --app <app_token> --table <table_id>         # 列 Bitable 看板全部 issue
 //	loop-bridge issue-upsert --app <app_token> --table <table_id> [--key-field external_key] < records.json
 //	    # 按 key-field 幂等 upsert（有则 update，无则 create），records.json 形如 {"records":[{"fields":{...}}]}
@@ -39,6 +41,8 @@ func main() {
 	switch cmd {
 	case "doc-dump":
 		runDocDump(args)
+	case "resolve-wiki":
+		runResolveWiki(args)
 	case "issues-list":
 		runIssuesList(args)
 	case "issue-upsert":
@@ -54,8 +58,9 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `用法:
-  loop-bridge doc-dump    --doc <document_id>
-  loop-bridge issues-list --app <app_token> --table <table_id>
+  loop-bridge doc-dump     --doc <document_id> | --wiki <wiki_node_token>
+  loop-bridge resolve-wiki --node <wiki_node_token>
+  loop-bridge issues-list  --app <app_token> --table <table_id>
   loop-bridge issue-upsert --app <app_token> --table <table_id> [--key-field external_key] < records.json
 
 环境变量: FEISHU_APP_ID, FEISHU_APP_SECRET（必填）; FEISHU_BASE_URL（可选，默认 https://open.feishu.cn）`)
@@ -80,11 +85,25 @@ func parseFlags(argv []string) map[string]string {
 
 func runDocDump(args map[string]string) {
 	doc := args["doc"]
-	if doc == "" {
-		fmt.Fprintln(os.Stderr, "缺少 --doc <document_id>")
+	wiki := args["wiki"]
+	if doc == "" && wiki == "" {
+		fmt.Fprintln(os.Stderr, "缺少 --doc <document_id> 或 --wiki <wiki_node_token>")
 		os.Exit(2)
 	}
 	c := mustClient()
+	if doc == "" {
+		// wiki 链接：先把知识库节点解析成底层文档对象
+		objToken, objType, err := c.resolveWikiNode(wiki)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "解析 wiki 节点失败:", err)
+			os.Exit(1)
+		}
+		if objType != "docx" {
+			fmt.Fprintf(os.Stderr, "wiki 节点 obj_type=%s，doc-dump 仅支持 docx 文档\n", objType)
+			os.Exit(2)
+		}
+		doc = objToken
+	}
 	blocks, err := c.fetchAllDocBlocks(doc)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "拉取文档失败:", err)
@@ -92,6 +111,25 @@ func runDocDump(args map[string]string) {
 	}
 	flat := flattenBlocks(blocks)
 	writeJSON(flat)
+}
+
+// ---------------------------------------------------------------------------
+// 子命令：resolve-wiki
+// ---------------------------------------------------------------------------
+
+func runResolveWiki(args map[string]string) {
+	node := args["node"]
+	if node == "" {
+		fmt.Fprintln(os.Stderr, "缺少 --node <wiki_node_token>")
+		os.Exit(2)
+	}
+	c := mustClient()
+	objToken, objType, err := c.resolveWikiNode(node)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "解析 wiki 节点失败:", err)
+		os.Exit(1)
+	}
+	writeJSON(map[string]string{"obj_token": objToken, "obj_type": objType})
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +464,30 @@ func (c *client) fetchAllDocBlocks(docID string) ([]rawBlock, error) {
 		pageToken = page.PageToken
 	}
 	return all, nil
+}
+
+// resolveWikiNode 把知识库（wiki）节点 token 解析成底层文档对象（obj_token + obj_type）。
+// docx 文档时 obj_token 即可直接作为 doc-dump 的 document_id。
+func (c *client) resolveWikiNode(nodeToken string) (objToken, objType string, err error) {
+	q := url.Values{}
+	q.Set("token", nodeToken)
+	data, err := c.doAPI(http.MethodGet, "/open-apis/wiki/v2/spaces/get_node?"+q.Encode(), nil)
+	if err != nil {
+		return "", "", err
+	}
+	var out struct {
+		Node struct {
+			ObjToken string `json:"obj_token"`
+			ObjType  string `json:"obj_type"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", "", err
+	}
+	if out.Node.ObjToken == "" {
+		return "", "", fmt.Errorf("未解析到 obj_token（确认应用有 wiki 读权限且节点 token 正确）")
+	}
+	return out.Node.ObjToken, out.Node.ObjType, nil
 }
 
 // fetchAllRecords 翻页拉取 Bitable 表全部记录。

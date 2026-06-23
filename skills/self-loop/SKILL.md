@@ -13,13 +13,14 @@ description: >
 
 收到飞书文档即开跑。你的职责是**做好前置校验、在缺配置时引导用户建立本地环境变量，然后把控制权交给确定性的 Workflow 脚本**，最后汇报收敛结果。不要自己手搓 loop——编排逻辑在 `self-loop.workflow.js` 里。
 
-## 0. 解析输入
+## 0. 解析输入（支持 docx 文档 + wiki 知识库两种链接）
 
-用户会给一个飞书文档，形式可能是：
-- 完整链接 `https://<tenant>.feishu.cn/docx/<TOKEN>` → `document_id` = `<TOKEN>`（`docx/` 后那段）。
-- 直接给 `document_id`。
+用户给的飞书在线文档可能是这几种形式，先识别 `kind` 和 `token`：
+- **docx 文档**：`https://<tenant>.feishu.cn/docx/<TOKEN>` → `kind=docx`，`token=<TOKEN>`（`docx/` 后、`?` 前那段）。
+- **wiki 知识库**：`https://<tenant>.feishu.cn/wiki/<TOKEN>` → `kind=wiki`，`token=<TOKEN>`（`wiki/` 后、`?` 前那段）。wiki 节点 token 不是 document_id，**需在 preflight 用 `resolve-wiki` 换成底层 docx id**。
+- 直接给裸 token：问用户是 docx 还是 wiki，别猜。
 
-提取出 `docId`。拿不准就用文本编号列表问用户确认，别猜。
+docx 的 `token` 即 `docId`；wiki 的 `token` 记为 `wikiNode`，待 preflight 解析出 `docId`。拿不准就用文本编号列表问用户确认。
 
 ## 1. 配置：全部走本地环境变量（缺啥引导建啥）
 
@@ -66,6 +67,12 @@ description: >
    返回 JSON（哪怕空数组）即通；报错则按错误信息修（loop-bridge 未装/权限/字段/网络），不要进入 loop。
    > 未安装 loop-bridge：`go install github.com/LiuLi4/self-loop/loop-bridge@latest`，或克隆本仓后 `go build -o ~/bin/loop-bridge ./loop-bridge`。
 3. **看板 schema**：Bitable 必须含字段 `external_key`(单行文本,唯一键)、`requirement`、`title`、`type`、`status`、`severity`、`acceptance_ref`、`evidence`、`updated_round`(数字)。缺字段先引导用户补（一次性）。
+4. **wiki → docx 解析**（仅当 §0 识别为 `kind=wiki`）：
+   ```bash
+   ${SELF_LOOP_BRIDGE_CMD:-loop-bridge} resolve-wiki --node "<wikiNode>"
+   ```
+   输出 `{obj_token, obj_type}`。要求 `obj_type=docx`，则 `docId = obj_token`；其它类型(sheet/bitable/mindnote 等)停下告知用户当前只支持 docx 文档。
+   > wiki 权限报错时，提示用户给自建应用补 `wiki:wiki:readonly`（知识库读）权限，并确认应用有该知识库访问权。
 4. **Rules 文件**：检查仓根 `self-loop.rules.md`（或 `$SELF_LOOP_RULES_PATH`）。不存在则引导用户从 `self-loop.rules.example.md` 复制一份并填上项目约定——所有 maker/checker 都会读它。
 5. **续跑探测**：检查 `.self-loop/run/<docId 前12位>/` 是否已有 `meta.json` + `dod/`。有则提示用户"检测到既有 run，将断点续跑（不重新冻结 DoD）"；这是正常的，确认后继续。
 

@@ -43,7 +43,7 @@ To start fresh, delete `.self-loop/run/<id>/`.
 ## Prerequisites
 
 - **Claude Code** with the `Workflow` tool and worktree-capable agents.
-- A **Feishu/Lark self-built app** with doc-read + bitable-read/write permissions.
+- A **Feishu/Lark self-built app** with doc-read (`docx:document`), wiki-read (`wiki:wiki:readonly`, for wiki links), and bitable-read/write (`bitable:app`) permissions.
 - A **Feishu Bitable** to act as the issue board, with fields:
   `external_key` (single-line text, the idempotency key), `requirement`, `title`, `type`,
   `status`, `severity`, `acceptance_ref`, `evidence`, `updated_round` (number).
@@ -89,10 +89,14 @@ The skill checks your env vars (and walks you through creating any that are miss
 Purely mechanical Feishu I/O — no requirement parsing (that's done semantically by the workflow's intake agent):
 
 ```bash
-loop-bridge doc-dump    --doc <document_id>                       # flatten a doc's blocks to text JSON
-loop-bridge issues-list --app <app_token> --table <table_id>      # list all board records
+loop-bridge doc-dump     --doc <document_id>                      # flatten a docx's blocks to text JSON
+loop-bridge doc-dump     --wiki <wiki_node_token>                 # resolve a wiki node to its docx, then flatten
+loop-bridge resolve-wiki --node <wiki_node_token>                 # just resolve: {obj_token, obj_type}
+loop-bridge issues-list  --app <app_token> --table <table_id>     # list all board records
 loop-bridge issue-upsert --app <app_token> --table <table_id> < records.json   # idempotent upsert by external_key
 ```
+
+Both Feishu **docx** links (`/docx/<token>`) and **wiki** links (`/wiki/<token>`) are supported; wiki nodes are resolved to their underlying docx automatically.
 
 ## Guardrails (built into the workflow)
 
