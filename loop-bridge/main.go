@@ -3,8 +3,9 @@
 // 只做"机械"读写，不含任何需求解析业务逻辑（需求切分交给编排层的 intake agent
 // 做语义处理）。子命令全部 stdout 输出 JSON、stderr 输出错误：
 //
-//	loop-bridge doc-dump    --doc <document_id> | --wiki <wiki_node_token>   # 拉取在线文档全部 block 文本
+//	loop-bridge doc-dump    --doc <document_id> | --wiki <wiki_node_token>   # 拉取在线 docx 文档全部 block 文本
 //	    # --wiki：先把知识库节点 token 解析成底层 docx，再拉取（仅支持 obj_type=docx）
+//	loop-bridge sheet-dump  --sheet <spreadsheet_token>                  # 读电子表格全部分表的单元格值
 //	loop-bridge resolve-wiki --node <wiki_node_token>                    # 仅解析 wiki 节点 → {obj_token, obj_type}
 //	loop-bridge issues-list --app <app_token> --table <table_id>         # 列 Bitable 看板全部 issue
 //	loop-bridge issue-upsert --app <app_token> --table <table_id> [--key-field external_key] < records.json
@@ -41,6 +42,8 @@ func main() {
 	switch cmd {
 	case "doc-dump":
 		runDocDump(args)
+	case "sheet-dump":
+		runSheetDump(args)
 	case "resolve-wiki":
 		runResolveWiki(args)
 	case "issues-list":
@@ -59,6 +62,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `用法:
   loop-bridge doc-dump     --doc <document_id> | --wiki <wiki_node_token>
+  loop-bridge sheet-dump   --sheet <spreadsheet_token>
   loop-bridge resolve-wiki --node <wiki_node_token>
   loop-bridge issues-list  --app <app_token> --table <table_id>
   loop-bridge issue-upsert --app <app_token> --table <table_id> [--key-field external_key] < records.json
@@ -130,6 +134,68 @@ func runResolveWiki(args map[string]string) {
 		os.Exit(1)
 	}
 	writeJSON(map[string]string{"obj_token": objToken, "obj_type": objType})
+}
+
+// ---------------------------------------------------------------------------
+// 子命令：sheet-dump（读电子表格）
+// ---------------------------------------------------------------------------
+
+// 读取上限，避免对超大表构造病态区间；需求表通常远小于此。
+const (
+	maxSheetRows = 5000
+	maxSheetCols = 100
+)
+
+func runSheetDump(args map[string]string) {
+	sheet := args["sheet"]
+	if sheet == "" {
+		fmt.Fprintln(os.Stderr, "缺少 --sheet <spreadsheet_token>")
+		os.Exit(2)
+	}
+	c := mustClient()
+	metas, err := c.listSheets(sheet)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "列电子表格分表失败:", err)
+		os.Exit(1)
+	}
+	type outSheet struct {
+		Title  string  `json:"title"`
+		Values [][]any `json:"values"`
+	}
+	out := struct {
+		Sheets []outSheet `json:"sheets"`
+	}{}
+	for _, m := range metas {
+		rows, cols := m.RowCount, m.ColCount
+		if rows <= 0 || rows > maxSheetRows {
+			rows = maxSheetRows
+		}
+		if cols <= 0 || cols > maxSheetCols {
+			cols = maxSheetCols
+		}
+		rng := fmt.Sprintf("%s!A1:%s%d", m.SheetID, colLetter(cols), rows)
+		vals, err := c.readSheetValues(sheet, rng)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "读取分表 %q 失败: %v\n", m.Title, err)
+			continue
+		}
+		out.Sheets = append(out.Sheets, outSheet{Title: m.Title, Values: vals})
+	}
+	writeJSON(out)
+}
+
+// colLetter 把列序号（1-based）转成 A1 记法的列字母：1→A，26→Z，27→AA。
+func colLetter(n int) string {
+	s := ""
+	for n > 0 {
+		n--
+		s = string(rune('A'+n%26)) + s
+		n /= 26
+	}
+	if s == "" {
+		s = "A"
+	}
+	return s
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +554,60 @@ func (c *client) resolveWikiNode(nodeToken string) (objToken, objType string, er
 		return "", "", fmt.Errorf("未解析到 obj_token（确认应用有 wiki 读权限且节点 token 正确）")
 	}
 	return out.Node.ObjToken, out.Node.ObjType, nil
+}
+
+// sheetMeta 是电子表格中一个分表的元信息。
+type sheetMeta struct {
+	SheetID  string
+	Title    string
+	RowCount int
+	ColCount int
+}
+
+// listSheets 列出电子表格的全部分表及其网格尺寸。
+func (c *client) listSheets(token string) ([]sheetMeta, error) {
+	path := "/open-apis/sheets/v3/spreadsheets/" + url.PathEscape(token) + "/sheets/query"
+	data, err := c.doAPI(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Sheets []struct {
+			SheetID        string `json:"sheet_id"`
+			Title          string `json:"title"`
+			GridProperties struct {
+				RowCount    int `json:"row_count"`
+				ColumnCount int `json:"column_count"`
+			} `json:"grid_properties"`
+		} `json:"sheets"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	res := make([]sheetMeta, 0, len(out.Sheets))
+	for _, s := range out.Sheets {
+		res = append(res, sheetMeta{SheetID: s.SheetID, Title: s.Title,
+			RowCount: s.GridProperties.RowCount, ColCount: s.GridProperties.ColumnCount})
+	}
+	return res, nil
+}
+
+// readSheetValues 读取某分表指定 A1 区间的单元格值（二维数组）。
+func (c *client) readSheetValues(token, rng string) ([][]any, error) {
+	path := "/open-apis/sheets/v2/spreadsheets/" + url.PathEscape(token) + "/values/" + url.PathEscape(rng)
+	data, err := c.doAPI(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		ValueRange struct {
+			Values [][]any `json:"values"`
+		} `json:"valueRange"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out.ValueRange.Values, nil
 }
 
 // fetchAllRecords 翻页拉取 Bitable 表全部记录。

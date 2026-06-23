@@ -16,6 +16,11 @@ const table = args?.table
 const MAX_ROUNDS = args?.maxRounds ?? 6
 const RUN = args?.runDir ?? `.self-loop/run/${(docId ?? 'run').slice(0, 12)}`
 const BRIDGE = args?.bridgeCmd ?? 'loop-bridge'
+// 文档类型：'docx'（默认）走 doc-dump，'sheet' 走 sheet-dump。由 SKILL.md 据 wiki 解析结果传入。
+const DOC_KIND = args?.docKind ?? 'docx'
+const READ_CMD = DOC_KIND === 'sheet'
+  ? `${BRIDGE} sheet-dump --sheet ${docId}`
+  : `${BRIDGE} doc-dump --doc ${docId}`
 const SCOPE_RULE = args?.scopeRule ?? ''
 // Rules（策略记忆）：所有 maker/checker 开工前必读；loop 会把历轮教训追加到它的 "## Learned" 节
 const RULES = args?.rulesPath ?? 'self-loop.rules.md'
@@ -117,8 +122,10 @@ if (boot.resume && (boot.requirements?.length ?? 0) > 0) {
 } else {
   // —— 全新 intake：解析文档 → 范围守卫 → 冻结 DoD → 写 meta ——
   const dump = await agent(
-    `运行 \`${BRIDGE} doc-dump --doc ${docId}\`，它输出文档全部 block 的扁平文本 JSON。
-     据此把文档语义切分成"需求"数组：每个需求含 key（稳定 id，如 REQ-1）、title、flow、apis。仅返回结构化结果。`,
+    `运行 \`${READ_CMD}\`。${DOC_KIND === 'sheet'
+      ? '输出是电子表格各分表的单元格二维数组(sheets[].values)；通常首行是表头、每行一个需求，列对应 标题/业务流程/接口 等——按表头语义切分。'
+      : '输出是文档全部 block 的扁平文本 JSON——据此语义切分。'}
+     切分成"需求"数组：每个需求含 key（稳定 id，如 REQ-1）、title、flow、apis。仅返回结构化结果。`,
     { label: 'intake:parse', phase: 'Intake', schema: REQ_SCHEMA })
 
   const inScope = []

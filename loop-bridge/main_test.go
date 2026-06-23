@@ -76,6 +76,15 @@ func TestPlanUpsert(t *testing.T) {
 	}
 }
 
+func TestColLetter(t *testing.T) {
+	cases := map[int]string{1: "A", 26: "Z", 27: "AA", 52: "AZ", 53: "BA", 0: "A"}
+	for n, want := range cases {
+		if got := colLetter(n); got != want {
+			t.Errorf("colLetter(%d)=%q, want %q", n, got, want)
+		}
+	}
+}
+
 func TestExtractText(t *testing.T) {
 	if got := extractText("plain"); got != "plain" {
 		t.Errorf("string: got %q", got)

@@ -91,12 +91,13 @@ Purely mechanical Feishu I/O — no requirement parsing (that's done semanticall
 ```bash
 loop-bridge doc-dump     --doc <document_id>                      # flatten a docx's blocks to text JSON
 loop-bridge doc-dump     --wiki <wiki_node_token>                 # resolve a wiki node to its docx, then flatten
+loop-bridge sheet-dump   --sheet <spreadsheet_token>             # read all sheets' cell values as JSON
 loop-bridge resolve-wiki --node <wiki_node_token>                 # just resolve: {obj_token, obj_type}
 loop-bridge issues-list  --app <app_token> --table <table_id>     # list all board records
 loop-bridge issue-upsert --app <app_token> --table <table_id> < records.json   # idempotent upsert by external_key
 ```
 
-Both Feishu **docx** links (`/docx/<token>`) and **wiki** links (`/wiki/<token>`) are supported; wiki nodes are resolved to their underlying docx automatically.
+Both Feishu **docx** documents and **spreadsheets (sheets)** are supported, via either `/docx/<token>` links or `/wiki/<token>` links — wiki nodes are resolved to their underlying docx or sheet automatically (the skill picks `doc-dump` vs `sheet-dump` from the resolved `obj_type`). Reading a sheet needs the `sheets:spreadsheet:readonly` scope.
 
 ## Guardrails (built into the workflow)
 
